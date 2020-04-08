@@ -89,7 +89,7 @@ typedef struct
 
   cl_program program;
   cl_kernel  accelerate_flow;
-  cl_kernel  propagate;
+  cl_kernel  lbm;
 
   cl_mem cells;
   cl_mem tmp_cells;
@@ -117,8 +117,9 @@ int initialise(const char* paramfile, const char* obstaclefile,
 ** accelerate_flow(), propagate(), rebound() & collision()
 */
 int timestep(const t_param params, t_speed* cells, t_speed* tmp_cells, int* obstacles, t_ocl ocl);
+int lbm(const t_param params,t_ocl ocl);
+
 int accelerate_flow(const t_param params, t_speed* cells, int* obstacles, t_ocl ocl);
-int propagate(const t_param params, t_speed* cells, t_speed* tmp_cells, t_ocl ocl);
 int rebound(const t_param params, t_speed* cells, t_speed* tmp_cells, int* obstacles, t_ocl ocl);
 int collision(const t_param params, t_speed* cells, t_speed* tmp_cells, int* obstacles, t_ocl ocl);
 int write_values(const t_param params, t_speed* cells, int* obstacles, float* av_vels);
@@ -156,6 +157,7 @@ int main(int argc, char* argv[])
   t_ocl    ocl;                 /* struct to hold OpenCL objects */
   t_speed* cells     = NULL;    /* grid containing fluid densities */
   t_speed* tmp_cells = NULL;    /* scratch space */
+  t_speed* swap_point = NULL;
   int*     obstacles = NULL;    /* grid indicating which cells are blocked */
   float* av_vels   = NULL;     /* a record of the av. velocity computed for each timestep */
   cl_int err;
@@ -198,6 +200,9 @@ int main(int argc, char* argv[])
   for (int tt = 0; tt < params.maxIters; tt++)
   {
     timestep(params, cells, tmp_cells, obstacles, ocl);
+    swap_point = tmp_cells;
+    tmp_cells = cells;
+    cells = swap_point;
     av_vels[tt] = av_velocity(params, cells, obstacles, ocl);
 #ifdef DEBUG
     printf("==timestep: %d==\n", tt);
@@ -237,7 +242,7 @@ int timestep(const t_param params, t_speed* cells, t_speed* tmp_cells, int* obst
   checkError(err, "writing cells data", __LINE__);
 
   accelerate_flow(params, cells, obstacles, ocl);
-  propagate(params, cells, tmp_cells, ocl);
+  lbm(params,ocl);
 
   // Read tmp_cells from device
   err = clEnqueueReadBuffer(
@@ -245,8 +250,7 @@ int timestep(const t_param params, t_speed* cells, t_speed* tmp_cells, int* obst
     sizeof(t_speed) * params.nx * params.ny, tmp_cells, 0, NULL, NULL);
   checkError(err, "reading tmp_cells data", __LINE__);
 
-  rebound(params, cells, tmp_cells, obstacles, ocl);
-  collision(params, cells, tmp_cells, obstacles, ocl);
+
   return EXIT_SUCCESS;
 }
 
@@ -281,34 +285,37 @@ int accelerate_flow(const t_param params, t_speed* cells, int* obstacles, t_ocl 
   return EXIT_SUCCESS;
 }
 
-int propagate(const t_param params, t_speed* cells, t_speed* tmp_cells, t_ocl ocl)
+int lbm(const t_param params, t_ocl ocl)
 {
   cl_int err;
-
   // Set kernel arguments
-  err = clSetKernelArg(ocl.propagate, 0, sizeof(cl_mem), &ocl.cells);
-  checkError(err, "setting propagate arg 0", __LINE__);
-  err = clSetKernelArg(ocl.propagate, 1, sizeof(cl_mem), &ocl.tmp_cells);
-  checkError(err, "setting propagate arg 1", __LINE__);
-  err = clSetKernelArg(ocl.propagate, 2, sizeof(cl_mem), &ocl.obstacles);
-  checkError(err, "setting propagate arg 2", __LINE__);
-  err = clSetKernelArg(ocl.propagate, 3, sizeof(cl_int), &params.nx);
-  checkError(err, "setting propagate arg 3", __LINE__);
-  err = clSetKernelArg(ocl.propagate, 4, sizeof(cl_int), &params.ny);
-  checkError(err, "setting propagate arg 4", __LINE__);
+  err = clSetKernelArg(ocl.lbm, 0, sizeof(cl_mem), &ocl.cells);
+  checkError(err, "setting lbm arg 0", __LINE__);
+  err = clSetKernelArg(ocl.lbm, 1, sizeof(cl_mem), &ocl.tmp_cells);
+  checkError(err, "setting lbm arg 1", __LINE__);
+  err = clSetKernelArg(ocl.lbm, 2, sizeof(cl_mem), &ocl.obstacles);
+  checkError(err, "setting lbm arg 2", __LINE__);
+  err = clSetKernelArg(ocl.lbm, 3, sizeof(cl_int), &params.nx);
+  checkError(err, "setting lbm arg 3", __LINE__);
+  err = clSetKernelArg(ocl.lbm, 4, sizeof(cl_int), &params.ny);
+  checkError(err, "setting lbm arg 4", __LINE__);
+  err = clSetKernelArg(ocl.lbm, 5, sizeof(cl_float), &params.omega);
+  checkError(err, "setting lbm arg 5", __LINE__);
 
-  // Enqueue kernel
   size_t global[2] = {params.nx, params.ny};
-  err = clEnqueueNDRangeKernel(ocl.queue, ocl.propagate,
+  err = clEnqueueNDRangeKernel(ocl.queue, ocl.lbm,
                                2, NULL, global, NULL, 0, NULL, NULL);
-  checkError(err, "enqueueing propagate kernel", __LINE__);
+  checkError(err, "enqueueing lbm kernel", __LINE__);
 
   // Wait for kernel to finish
   err = clFinish(ocl.queue);
-  checkError(err, "waiting for propagate kernel", __LINE__);
+  checkError(err, "waiting for lbm kernel", __LINE__);
 
   return EXIT_SUCCESS;
 }
+
+
+
 
 int rebound(const t_param params, t_speed* cells, t_speed* tmp_cells, int* obstacles, t_ocl ocl)
 {
@@ -698,10 +705,13 @@ int initialise(const char* paramfile, const char* obstaclefile,
   checkError(err, "building program", __LINE__);
 
   // Create OpenCL kernels
+  ocl->lbm = clCreateKernel(ocl->program, "lbm", &err);
+  checkError(err,"creating lbm kernel", __LINE__);
   ocl->accelerate_flow = clCreateKernel(ocl->program, "accelerate_flow", &err);
   checkError(err, "creating accelerate_flow kernel", __LINE__);
-  ocl->propagate = clCreateKernel(ocl->program, "propagate", &err);
-  checkError(err, "creating propagate kernel", __LINE__);
+  ocl->lbm = clCreateKernel(ocl->program,"lbm",&err);
+  checkError(err, "creating lbm kernel", __LINE__);
+
 
   // Allocate OpenCL buffers
   ocl->cells = clCreateBuffer(
@@ -742,7 +752,6 @@ int finalise(const t_param* params, t_speed** cells_ptr, t_speed** tmp_cells_ptr
   clReleaseMemObject(ocl.tmp_cells);
   clReleaseMemObject(ocl.obstacles);
   clReleaseKernel(ocl.accelerate_flow);
-  clReleaseKernel(ocl.propagate);
   clReleaseProgram(ocl.program);
   clReleaseCommandQueue(ocl.queue);
   clReleaseContext(ocl.context);
