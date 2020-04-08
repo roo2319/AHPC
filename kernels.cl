@@ -2,12 +2,9 @@
 
 #define NSPEEDS         9
 
-typedef struct
-{
-  float speeds[NSPEEDS];
-} t_speed;
+#define INDEX(ii,jj,sp,nx,ny) ((ii)+(jj)*(nx)+(sp)*(nx)*(ny))
 
-kernel void accelerate_flow(global t_speed* cells,
+kernel void accelerate_flow(global float* cells,
                             global int* obstacles,
                             int nx, int ny,
                             float density, float accel)
@@ -25,23 +22,23 @@ kernel void accelerate_flow(global t_speed* cells,
   /* if the cell is not occupied and
   ** we don't send a negative density */
   if (!obstacles[ii + jj* nx]
-      && (cells[ii + jj* nx].speeds[3] - w1) > 0.f
-      && (cells[ii + jj* nx].speeds[6] - w2) > 0.f
-      && (cells[ii + jj* nx].speeds[7] - w2) > 0.f)
+      && (cells[INDEX(ii,jj,3,nx,ny)] - w1) > 0.f
+      && (cells[INDEX(ii,jj,6,nx,ny)] - w2) > 0.f
+      && (cells[INDEX(ii,jj,7,nx,ny)] - w2) > 0.f)
   {
     /* increase 'east-side' densities */
-    cells[ii + jj* nx].speeds[1] += w1;
-    cells[ii + jj* nx].speeds[5] += w2;
-    cells[ii + jj* nx].speeds[8] += w2;
+    cells[INDEX(ii,jj,1,nx,ny)] += w1;
+    cells[INDEX(ii,jj,5,nx,ny)] += w2;
+    cells[INDEX(ii,jj,8,nx,ny)] += w2;
     /* decrease 'west-side' densities */
-    cells[ii + jj* nx].speeds[3] -= w1;
-    cells[ii + jj* nx].speeds[6] -= w2;
-    cells[ii + jj* nx].speeds[7] -= w2;
+    cells[INDEX(ii,jj,3,nx,ny)] -= w1;
+    cells[INDEX(ii,jj,6,nx,ny)] -= w2;
+    cells[INDEX(ii,jj,7,nx,ny)] -= w2;
   }
 }
 
-kernel void lbm(global t_speed* cells,
-                global t_speed* tmp_cells,
+kernel void lbm(global float* cells,
+                global float* tmp_cells,
                 global int* obstacles,
                 int nx, int ny,float omega)
 {
@@ -62,29 +59,30 @@ kernel void lbm(global t_speed* cells,
   int y_s = (jj == 0) ? (jj + ny - 1) : (jj - 1);
   int x_w = (ii == 0) ? (ii + nx - 1) : (ii - 1);
 
-  const float speed0 = cells[ii + jj*nx].speeds[0]; /* central cell, no movement */
-  const float speed1 = cells[x_w + jj*nx].speeds[1]; /* east */
-  const float speed2 = cells[ii + y_s*nx].speeds[2]; /* north */
-  const float speed3 = cells[x_e + jj*nx].speeds[3]; /* west */
-  const float speed4 = cells[ii + y_n*nx].speeds[4]; /* south */
-  const float speed5 = cells[x_w + y_s*nx].speeds[5]; /* north-east */
-  const float speed6 = cells[x_e + y_s*nx].speeds[6]; /* north-west */
-  const float speed7 = cells[x_e + y_n*nx].speeds[7]; /* south-west */
-  const float speed8 = cells[x_w + y_n*nx].speeds[8]; /* south-east */
+  const float speed0 = cells[INDEX(ii,jj,0,nx,ny)]; /* central cell, no movement */
+  const float speed1 = cells[INDEX(x_w,jj,1,nx,ny)]; /* west */
+  const float speed2 = cells[INDEX(ii,y_s,2,nx,ny)]; /* south */
+  const float speed3 = cells[INDEX(x_e,jj,3,nx,ny)]; /* east */
+  const float speed4 = cells[INDEX(ii,y_n,4,nx,ny)]; /* north */
+  const float speed5 = cells[INDEX(x_w,y_s,5,nx,ny)]; /* south-west */
+  const float speed6 = cells[INDEX(x_e,y_s,6,nx,ny)];  /* south-east */
+  const float speed7 = cells[INDEX(x_e,y_n,7,nx,ny)]; /* north-east */
+  const float speed8 = cells[INDEX(x_w,y_n,8,nx,ny)]; /* north-west */
 
 
   if (obstacles[jj*nx + ii])
   {
-
-    tmp_cells[ii + jj*nx].speeds[0] = speed0;
-    tmp_cells[ii + jj*nx].speeds[3] = speed1;
-    tmp_cells[ii + jj*nx].speeds[4] = speed2;
-    tmp_cells[ii + jj*nx].speeds[1] = speed3;
-    tmp_cells[ii + jj*nx].speeds[2] = speed4;
-    tmp_cells[ii + jj*nx].speeds[7] = speed5;
-    tmp_cells[ii + jj*nx].speeds[8] = speed6;
-    tmp_cells[ii + jj*nx].speeds[5] = speed7;
-    tmp_cells[ii + jj*nx].speeds[6] = speed8;
+    /* called after propagate, so taking values from scratch space
+    ** mirroring, and writing into main grid */
+    tmp_cells[INDEX(ii,jj,0,nx,ny)] = speed0; /* central cell, no movement */
+    tmp_cells[INDEX(ii,jj,3,nx,ny)] = speed1; /* west */
+    tmp_cells[INDEX(ii,jj,4,nx,ny)] = speed2; /* south */
+    tmp_cells[INDEX(ii,jj,1,nx,ny)] = speed3; /* east */
+    tmp_cells[INDEX(ii,jj,2,nx,ny)] = speed4; /* north */
+    tmp_cells[INDEX(ii,jj,7,nx,ny)] = speed5; /* south-west */
+    tmp_cells[INDEX(ii,jj,8,nx,ny)] = speed6;  /* south-east */
+    tmp_cells[INDEX(ii,jj,5,nx,ny)] = speed7; /* north-east */
+    tmp_cells[INDEX(ii,jj,6,nx,ny)] = speed8; /* north-west */
   }
   else{
     /* compute local density total */
@@ -156,15 +154,15 @@ kernel void lbm(global t_speed* cells,
                                       - u_sq / (2.f * c_sq));
 
     /* relaxation step */
-    tmp_cells[ii + jj*nx].speeds[0] = speed0 + omega * (d_equ[0] - speed0);
-    tmp_cells[ii + jj*nx].speeds[1] = speed1 + omega * (d_equ[1] - speed1);
-    tmp_cells[ii + jj*nx].speeds[2] = speed2 + omega * (d_equ[2] - speed2);
-    tmp_cells[ii + jj*nx].speeds[3] = speed3 + omega * (d_equ[3] - speed3);
-    tmp_cells[ii + jj*nx].speeds[4] = speed4 + omega * (d_equ[4] - speed4);
-    tmp_cells[ii + jj*nx].speeds[5] = speed5 + omega * (d_equ[5] - speed5);
-    tmp_cells[ii + jj*nx].speeds[6] = speed6 + omega * (d_equ[6] - speed6);
-    tmp_cells[ii + jj*nx].speeds[7] = speed7 + omega * (d_equ[7] - speed7);
-    tmp_cells[ii + jj*nx].speeds[8] = speed8 + omega * (d_equ[8] - speed8);
+    tmp_cells[INDEX(ii,jj,0,nx,ny)] = speed0 + omega * (d_equ[0] - speed0);
+    tmp_cells[INDEX(ii,jj,1,nx,ny)] = speed1 + omega * (d_equ[1] - speed1);
+    tmp_cells[INDEX(ii,jj,2,nx,ny)] = speed2 + omega * (d_equ[2] - speed2);
+    tmp_cells[INDEX(ii,jj,3,nx,ny)] = speed3 + omega * (d_equ[3] - speed3);
+    tmp_cells[INDEX(ii,jj,4,nx,ny)] = speed4 + omega * (d_equ[4] - speed4);
+    tmp_cells[INDEX(ii,jj,5,nx,ny)] = speed5 + omega * (d_equ[5] - speed5);
+    tmp_cells[INDEX(ii,jj,6,nx,ny)] = speed6 + omega * (d_equ[6] - speed6);
+    tmp_cells[INDEX(ii,jj,7,nx,ny)] = speed7 + omega * (d_equ[7] - speed7);
+    tmp_cells[INDEX(ii,jj,8,nx,ny)] = speed8 + omega * (d_equ[8] - speed8);
 
   }
 
