@@ -106,7 +106,7 @@ typedef struct
 
 /* load params, allocate memory, load obstacles & initialise fluid particle densities */
 int initialise(const char* paramfile, const char* obstaclefile,
-              t_param* params, float** cells_ptr, float** tmp_cells_ptr,
+               t_param* params, float** cells_ptr, float** tmp_cells_ptr,
                int** obstacles_ptr, float** av_vels_ptr, t_ocl* ocl);
 
 /*
@@ -114,10 +114,12 @@ int initialise(const char* paramfile, const char* obstaclefile,
 ** timestep calls, in order, the functions:
 ** accelerate_flow(), propagate(), rebound() & collision()
 */
-int timestep(const t_param params, float* cells, float* tmp_cells, int* obstacles, t_ocl ocl);
+int timestep(const t_param params, float* tmp_cells, t_ocl ocl);
 int lbm(const t_param params,t_ocl ocl);
 
-int accelerate_flow(const t_param params, float* cells, int* obstacles, t_ocl ocl);
+int accelerate_flow(const t_param params, t_ocl ocl);
+int rebound(const t_param params, float* cells, float* tmp_cells, int* obstacles, t_ocl ocl);
+int collision(const t_param params, float* cells, float* tmp_cells, int* obstacles, t_ocl ocl);
 int write_values(const t_param params, float* cells, int* obstacles, float* av_vels);
 
 /* finalise, including freeing up allocated memory */
@@ -153,7 +155,8 @@ int main(int argc, char* argv[])
   t_ocl    ocl;                 /* struct to hold OpenCL objects */
   float* cells     = NULL;    /* grid containing fluid densities */
   float* tmp_cells = NULL;    /* scratch space */
-  float* swap_point = NULL;
+  float* cells_swap_pt = NULL;
+  cl_mem swap_point = NULL;
   int*     obstacles = NULL;    /* grid indicating which cells are blocked */
   float* av_vels   = NULL;     /* a record of the av. velocity computed for each timestep */
   cl_int err;
@@ -195,10 +198,13 @@ int main(int argc, char* argv[])
 
   for (int tt = 0; tt < params.maxIters; tt++)
   {
-    timestep(params, cells, tmp_cells, obstacles, ocl);
-    swap_point = tmp_cells;
+    timestep(params, tmp_cells, ocl);
+    swap_point = ocl.tmp_cells;
+    ocl.tmp_cells = ocl.cells;
+    ocl.cells = swap_point;
+    cells_swap_pt = tmp_cells;
     tmp_cells = cells;
-    cells = swap_point;
+    cells = cells_swap_pt;
     av_vels[tt] = av_velocity(params, cells, obstacles, ocl);
 #ifdef DEBUG
     printf("==timestep: %d==\n", tt);
@@ -227,17 +233,17 @@ int main(int argc, char* argv[])
   return EXIT_SUCCESS;
 }
 
-int timestep(const t_param params, float* cells, float* tmp_cells, int* obstacles, t_ocl ocl)
+int timestep(const t_param params, float* tmp_cells, t_ocl ocl)
 {
   cl_int err;
 
   // Write cells to device
-  err = clEnqueueWriteBuffer(
-    ocl.queue, ocl.cells, CL_TRUE, 0,
-    sizeof(float) * params.nx * params.ny * NSPEEDS, cells, 0, NULL, NULL);
-  checkError(err, "writing cells data", __LINE__);
+  // err = clEnqueueWriteBuffer(
+  //   ocl.queue, ocl.cells, CL_TRUE, 0,
+  //   sizeof(cl_float) * params.nx * params.ny * NSPEEDS, cells, 0, NULL, NULL);
+  // checkError(err, "writing cells data", __LINE__);
 
-  accelerate_flow(params, cells, obstacles, ocl);
+  accelerate_flow(params, ocl);
   // propagate(params, cells, tmp_cells, ocl);
   lbm(params,ocl);
 
@@ -251,7 +257,7 @@ int timestep(const t_param params, float* cells, float* tmp_cells, int* obstacle
   return EXIT_SUCCESS;
 }
 
-int accelerate_flow(const t_param params, float* cells, int* obstacles, t_ocl ocl)
+int accelerate_flow(const t_param params, t_ocl ocl)
 {
   cl_int err;
 
@@ -332,7 +338,7 @@ float av_velocity(const t_param params, float* cells, int* obstacles, t_ocl ocl)
       {
         /* local density total */
         float local_density = 0.f;
-      for (int kk=0; kk < NSPEEDS; kk++){
+        for (int kk=0; kk < NSPEEDS; kk++){
            local_density += cells[INDEX(ii,jj,kk,params.nx,params.ny)];
         }
 
@@ -436,7 +442,7 @@ int initialise(const char* paramfile, const char* obstaclefile,
   */
 
   /* main grid */
-  *cells_ptr = (float*) malloc(sizeof(float) * params->nx * params->ny * NSPEEDS);
+ *cells_ptr = (float*) malloc(sizeof(float) * params->nx * params->ny * NSPEEDS);
 
 
   if (*cells_ptr == NULL) die("cannot allocate memory for cells", __LINE__, __FILE__);
@@ -460,6 +466,8 @@ int initialise(const char* paramfile, const char* obstaclefile,
   {
     for (int ii = 0; ii < params->nx; ii++)
     {
+      /* centre */
+      // printf(INDEX(ii,jj,0,params.nx,params.ny)))
       (*cells_ptr)[INDEX(ii,jj,0,params->nx,params->ny)] = w0;
       /* axis directions */
       (*cells_ptr)[INDEX(ii,jj,1,params->nx,params->ny)] = w1;
@@ -574,6 +582,7 @@ int initialise(const char* paramfile, const char* obstaclefile,
   checkError(err,"creating lbm kernel", __LINE__);
   ocl->accelerate_flow = clCreateKernel(ocl->program, "accelerate_flow", &err);
   checkError(err, "creating accelerate_flow kernel", __LINE__);
+
   ocl->lbm = clCreateKernel(ocl->program,"lbm",&err);
   checkError(err, "creating lbm kernel", __LINE__);
 
@@ -616,6 +625,7 @@ int finalise(const t_param* params, float** cells_ptr, float** tmp_cells_ptr,
   clReleaseMemObject(ocl.cells);
   clReleaseMemObject(ocl.tmp_cells);
   clReleaseMemObject(ocl.obstacles);
+  clReleaseKernel(ocl.lbm);
   clReleaseKernel(ocl.accelerate_flow);
   clReleaseProgram(ocl.program);
   clReleaseCommandQueue(ocl.queue);
