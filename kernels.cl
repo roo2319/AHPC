@@ -10,8 +10,8 @@ kernel void accelerate_flow(global float* cells,
                             float density, float accel)
 {
   /* compute weighting factors */
-  float w1 = density * accel / 9.0;
-  float w2 = density * accel / 36.0;
+  float w1 = native_divide(density * accel , 9.0f);
+  float w2 = native_divide(density * accel , 36.0f);
 
   /* modify the 2nd row of the grid */
   int jj = ny - 2;
@@ -25,7 +25,7 @@ kernel void accelerate_flow(global float* cells,
       && (cells[INDEX(ii,jj,3,nx,ny)] - w1) > 0.f
       && (cells[INDEX(ii,jj,6,nx,ny)] - w2) > 0.f
       && (cells[INDEX(ii,jj,7,nx,ny)] - w2) > 0.f)
-  {
+    {
     /* increase 'east-side' densities */
     cells[INDEX(ii,jj,1,nx,ny)] += w1;
     cells[INDEX(ii,jj,5,nx,ny)] += w2;
@@ -34,61 +34,108 @@ kernel void accelerate_flow(global float* cells,
     cells[INDEX(ii,jj,3,nx,ny)] -= w1;
     cells[INDEX(ii,jj,6,nx,ny)] -= w2;
     cells[INDEX(ii,jj,7,nx,ny)] -= w2;
-  }
+    }
 }
+
 
 kernel void lbm(global float* cells,
                 global float* tmp_cells,
                 global int* obstacles,
-                int nx, int ny,float omega)
+                local  float* cellblk,
+                local float* local_sum, //stores per thread, maybe not needed
+                global float* partial_sum, //stores per workgroup
+                int globalnx, int globalny, int localnx, int localny, 
+                float omega)
 {
   float c_sq = 1.f / 3.f; /* square of speed of sound */
   float w0 = 4.f / 9.f;  /* weighting factor */
   float w1 = 1.f / 9.f;  /* weighting factor */
   float w2 = 1.f / 36.f; /* weighting factor */
-  int    tot_cells = 0;  /* no. of cells used in calculation */
-  float tot_u;          /* accumulated magnitudes of velocity for each cell */
+  float tot_u = 0;          /* accumulated magnitudes of velocity for each cell */
+  float speed0,speed1,speed2,speed3,speed4,speed5,speed6,speed7,speed8;
   /* get column and row indices */
   int ii = get_global_id(0);
   int jj = get_global_id(1);
+  int lx = get_local_id(0);
+  int ly = get_local_id(1);
+
+
+  //Loop over speeds
+    //Loop over Y blocks
+        // if (groupx == 1 && groupy == 1){
+        // }      
+        //can't actually write speed :((((((
+          // Error with Lvalue (invalid left hand side)
+          
+  for (int kk = 0; kk < NSPEEDS; kk++){
+    cellblk[INDEX(lx,ly,kk,localnx,localny)] = cells[INDEX(ii,jj,kk,globalnx,globalny)];
+  }
+  barrier(CLK_LOCAL_MEM_FENCE);
+  // if (ii == 0 && jj == 0) printf("iter"); 
+  // if (get_group_id(0) == 1 && get_group_id(1) == 1){
+  //         // printf("Local: %d, %d Global: %d,%d\n", lx,ly, globalx+lx,globaly+ly);
+  //       printf("\n\n\n\n\n\n\n\niter\n");
+  //       }
+
+  //Array to lookup write direction
+  int indexLookup[9][2] = {{0,0},{3,1},{4,2},{1,3},{2,4},{7,5},{8,6},{5,7},{6,8}};
+
 
   /* determine indices of axis-direction neighbours
   ** respecting periodic boundary conditions (wrap around) */
-  int y_n = (jj + 1) % ny;
-  int x_e = (ii + 1) % nx;
-  int y_s = (jj == 0) ? (jj + ny - 1) : (jj - 1);
-  int x_w = (ii == 0) ? (ii + nx - 1) : (ii - 1);
+  if (ly+1 < localny && lx+1 < localnx && ly-1 >= 0 && lx-1 >= 0){
+    int y_n = (ly + 1);
+    int x_e = (lx + 1);
+    int y_s = (ly - 1);
+    int x_w = (lx - 1);
+    speed0 = cellblk[INDEX(lx,ly,0,localnx,localny)]; /* central cell, no movement */
+    speed1 = cellblk[INDEX(x_w,ly,1,localnx,localny)]; /* west */
+    speed2 = cellblk[INDEX(lx,y_s,2,localnx,localny)]; /* south */
+    speed3 = cellblk[INDEX(x_e,ly,3,localnx,localny)]; /* east */
+    speed4 = cellblk[INDEX(lx,y_n,4,localnx,localny)]; /* north */
+    speed5 = cellblk[INDEX(x_w,y_s,5,localnx,localny)]; /* south-west */
+    speed6 = cellblk[INDEX(x_e,y_s,6,localnx,localny)];  /* south-east */
+    speed7 = cellblk[INDEX(x_e,y_n,7,localnx,localny)]; /* north-east */
+    speed8 = cellblk[INDEX(x_w,y_n,8,localnx,localny)]; /* north-west */
+  }
+  // remote access
+  else{
+    int y_n = (jj + 1) % globalny;
+    int x_e = (ii + 1) % globalnx;
+    int y_s = (jj == 0) ? (jj + globalny - 1) : (jj - 1);
+    int x_w = (ii == 0) ? (ii + globalnx - 1) : (ii - 1);
 
-  const float speed0 = cells[INDEX(ii,jj,0,nx,ny)]; /* central cell, no movement */
-  const float speed1 = cells[INDEX(x_w,jj,1,nx,ny)]; /* west */
-  const float speed2 = cells[INDEX(ii,y_s,2,nx,ny)]; /* south */
-  const float speed3 = cells[INDEX(x_e,jj,3,nx,ny)]; /* east */
-  const float speed4 = cells[INDEX(ii,y_n,4,nx,ny)]; /* north */
-  const float speed5 = cells[INDEX(x_w,y_s,5,nx,ny)]; /* south-west */
-  const float speed6 = cells[INDEX(x_e,y_s,6,nx,ny)];  /* south-east */
-  const float speed7 = cells[INDEX(x_e,y_n,7,nx,ny)]; /* north-east */
-  const float speed8 = cells[INDEX(x_w,y_n,8,nx,ny)]; /* north-west */
+    speed0 = cells[INDEX(ii,jj,0,globalnx,globalny)]; /* central cell, no movement */
+    speed1 = cells[INDEX(x_w,jj,1,globalnx,globalny)]; /* west */
+    speed2 = cells[INDEX(ii,y_s,2,globalnx,globalny)]; /* south */
+    speed3 = cells[INDEX(x_e,jj,3,globalnx,globalny)]; /* east */
+    speed4 = cells[INDEX(ii,y_n,4,globalnx,globalny)]; /* north */
+    speed5 = cells[INDEX(x_w,y_s,5,globalnx,globalny)]; /* south-west */
+    speed6 = cells[INDEX(x_e,y_s,6,globalnx,globalny)];  /* south-east */
+    speed7 = cells[INDEX(x_e,y_n,7,globalnx,globalny)]; /* north-east */
+    speed8 = cells[INDEX(x_w,y_n,8,globalnx,globalny)]; /* north-west */
+  }
 
-
-  if (obstacles[jj*nx + ii])
+  if (obstacles[jj*globalnx + ii])
   {
-    /* called after propagate, so taking values from scratch space
-    ** mirroring, and writing into main grid */
-    tmp_cells[INDEX(ii,jj,0,nx,ny)] = speed0; /* central cell, no movement */
-    tmp_cells[INDEX(ii,jj,3,nx,ny)] = speed1; /* west */
-    tmp_cells[INDEX(ii,jj,4,nx,ny)] = speed2; /* south */
-    tmp_cells[INDEX(ii,jj,1,nx,ny)] = speed3; /* east */
-    tmp_cells[INDEX(ii,jj,2,nx,ny)] = speed4; /* north */
-    tmp_cells[INDEX(ii,jj,7,nx,ny)] = speed5; /* south-west */
-    tmp_cells[INDEX(ii,jj,8,nx,ny)] = speed6;  /* south-east */
-    tmp_cells[INDEX(ii,jj,5,nx,ny)] = speed7; /* north-east */
-    tmp_cells[INDEX(ii,jj,6,nx,ny)] = speed8; /* north-west */
+      
+    tmp_cells[INDEX(ii,jj,0,globalnx,globalny)] = speed0;
+    tmp_cells[INDEX(ii,jj,3,globalnx,globalny)] = speed1;
+    tmp_cells[INDEX(ii,jj,4,globalnx,globalny)] = speed2;
+    tmp_cells[INDEX(ii,jj,1,globalnx,globalny)] = speed3;
+    tmp_cells[INDEX(ii,jj,2,globalnx,globalny)] = speed4;
+    tmp_cells[INDEX(ii,jj,7,globalnx,globalny)] = speed5;
+    tmp_cells[INDEX(ii,jj,8,globalnx,globalny)] = speed6;
+    tmp_cells[INDEX(ii,jj,5,globalnx,globalny)] = speed7;
+    tmp_cells[INDEX(ii,jj,6,globalnx,globalny)] = speed8;
+    local_sum[lx+ly*localnx] = 0;
   }
   else{
-    /* compute local density total */
     float local_density = 0.f;
 
-      local_density = speed0 + speed1 + speed2 + speed3 + speed4 + speed5 + speed6 + speed7 + speed8;
+
+    local_density = speed0 + speed1 + speed2 + speed3 + speed4 + speed5 + speed6 + speed7 + speed8;
+
 
     /* compute x velocity component */
     float u_x = (speed1
@@ -154,16 +201,33 @@ kernel void lbm(global float* cells,
                                       - u_sq / (2.f * c_sq));
 
     /* relaxation step */
-    tmp_cells[INDEX(ii,jj,0,nx,ny)] = speed0 + omega * (d_equ[0] - speed0);
-    tmp_cells[INDEX(ii,jj,1,nx,ny)] = speed1 + omega * (d_equ[1] - speed1);
-    tmp_cells[INDEX(ii,jj,2,nx,ny)] = speed2 + omega * (d_equ[2] - speed2);
-    tmp_cells[INDEX(ii,jj,3,nx,ny)] = speed3 + omega * (d_equ[3] - speed3);
-    tmp_cells[INDEX(ii,jj,4,nx,ny)] = speed4 + omega * (d_equ[4] - speed4);
-    tmp_cells[INDEX(ii,jj,5,nx,ny)] = speed5 + omega * (d_equ[5] - speed5);
-    tmp_cells[INDEX(ii,jj,6,nx,ny)] = speed6 + omega * (d_equ[6] - speed6);
-    tmp_cells[INDEX(ii,jj,7,nx,ny)] = speed7 + omega * (d_equ[7] - speed7);
-    tmp_cells[INDEX(ii,jj,8,nx,ny)] = speed8 + omega * (d_equ[8] - speed8);
+    tmp_cells[INDEX(ii,jj,0,globalnx,globalny)] = speed0 + (omega * (d_equ[0] - speed0));
+    tmp_cells[INDEX(ii,jj,1,globalnx,globalny)] = speed1 + (omega * (d_equ[1] - speed1));
+    tmp_cells[INDEX(ii,jj,2,globalnx,globalny)] = speed2 + (omega * (d_equ[2] - speed2));
+    tmp_cells[INDEX(ii,jj,3,globalnx,globalny)] = speed3 + (omega * (d_equ[3] - speed3));
+    tmp_cells[INDEX(ii,jj,4,globalnx,globalny)] = speed4 + (omega * (d_equ[4] - speed4));
+    tmp_cells[INDEX(ii,jj,5,globalnx,globalny)] = speed5 + (omega * (d_equ[5] - speed5));
+    tmp_cells[INDEX(ii,jj,6,globalnx,globalny)] = speed6 + (omega * (d_equ[6] - speed6));
+    tmp_cells[INDEX(ii,jj,7,globalnx,globalny)] = speed7 + (omega * (d_equ[7] - speed7));
+    tmp_cells[INDEX(ii,jj,8,globalnx,globalny)] = speed8 + (omega * (d_equ[8] - speed8));
 
-  }
+    tot_u += native_sqrt((u_x * u_x) + (u_y * u_y));
+        /* increase counter of inspected cells */
 
+    //take to outer loop
+    local_sum[lx+ly*localnx] = tot_u;
+    }
+
+  barrier(CLK_LOCAL_MEM_FENCE);
+
+  if (lx == 0 && ly == 0){
+    float sum = 0;
+      for (int i = 0; i<localnx*localny; i++){
+          sum += local_sum[i];
+      }
+  partial_sum[get_group_id(0) + get_group_id(1) * get_num_groups(0)] = sum;
+    }
 }
+
+/* compute local density total */
+
