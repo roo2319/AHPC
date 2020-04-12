@@ -144,7 +144,7 @@ float total_density(const t_param params, float* cells);
 float av_velocity(const t_param params, float* cells, int* obstacles, t_ocl ocl);
 
 /* calculate Reynolds number */
-float calc_reynolds(const t_param params, float* partial_sums);
+float calc_reynolds(const t_param params, float average);
 int write_values(const t_param params, float* cells, int* obstacles, float* av_vels);
 
 /* utility functions */
@@ -174,7 +174,7 @@ int reduction(t_param params, t_ocl ocl,float* av_ptr){
   checkError(err, "setting reduction arg 3", __LINE__);
 
   // Enqueue kernel
-  size_t global[1] = {params.reduction_cap};
+  size_t global[1] = {params.reduction_count};
   err = clEnqueueNDRangeKernel(ocl.queue, ocl.reduction,
                                1, NULL, global, NULL, 0, NULL, NULL);
   checkError(err, "enqueueing reduction kernel", __LINE__);
@@ -182,7 +182,7 @@ int reduction(t_param params, t_ocl ocl,float* av_ptr){
   clFinish(ocl.queue);
   checkError(err, "waiting for the end", __LINE__);
 
-  clEnqueueReadBuffer(ocl.queue,ocl.averages,CL_TRUE,0,sizeof(cl_float) * params.reduction_cap,av_ptr,0,NULL,NULL);
+  clEnqueueReadBuffer(ocl.queue,ocl.averages,CL_TRUE,0,sizeof(cl_float) * params.reduction_count,av_ptr,0,NULL,NULL);
 
   return EXIT_SUCCESS;
 }
@@ -258,8 +258,8 @@ int main(int argc, char* argv[])
 
     params.reduction_count++;
     if (params.reduction_count == params.reduction_cap){
-      params.reduction_count = 0;
       reduction(params,ocl,av_ptr);
+      params.reduction_count = 0;
       av_ptr = &av_ptr[params.reduction_cap];
     }
 
@@ -272,6 +272,11 @@ int main(int argc, char* argv[])
     printf("tot density: %.12E\n", total_density(params, cells));
 #endif
   }
+
+  // Final reduction
+  if (params.reduction_count != 0){
+    reduction(params,ocl,av_ptr);
+      }
 
   
   // Deal with the last averages
@@ -292,7 +297,7 @@ int main(int argc, char* argv[])
 
   /* write final values and free memory */
   printf("==done==\n");
-  printf("Reynolds number:\t\t%.12E\n", calc_reynolds(params, partial_sums));
+  printf("Reynolds number:\t\t%.12E\n", calc_reynolds(params, av_vels[params.maxIters-1]));
   printf("Elapsed time:\t\t\t%.6lf (s)\n", toc - tic);
   printf("Elapsed user CPU time:\t\t%.6lf (s)\n", usrtim);
   printf("Elapsed system CPU time:\t%.6lf (s)\n", systim);
@@ -476,8 +481,8 @@ int initialise(const char* paramfile, const char* obstaclefile,
   fclose(fp);
 
   // Local size
-  params->localnx = 16;
-  params->localny = 16;
+  params->localnx = 32;
+  params->localny = 1;
   params->nworkgroupsX = params->nx/params->localnx;
   params->nworkgroupsY = params->ny/params->localny; 
   params->reduction_count = 0;
@@ -705,12 +710,11 @@ int finalise(const t_param* params, float** cells_ptr, float** tmp_cells_ptr,
 }
 
 
-float calc_reynolds(const t_param params, float* partial_sums)
+float calc_reynolds(const t_param params, float average)
 {
   const float viscosity = 1.f / 6.f * (2.f / params.omega - 1.f);
 
-  // BROKE
-  return 1 * params.reynolds_dim / viscosity;
+  return average * params.reynolds_dim / viscosity;
 }
 
 float total_density(const t_param params, float* cells)
