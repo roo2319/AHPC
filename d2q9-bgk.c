@@ -231,6 +231,7 @@ int main(int argc, char* argv[])
   }
   params.free_cells = free_cells;
 
+
   // Write cells to OpenCL buffer
   err = clEnqueueWriteBuffer(
     ocl.queue, ocl.cells, CL_TRUE, 0,
