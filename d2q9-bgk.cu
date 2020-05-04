@@ -102,6 +102,20 @@ typedef struct
   float* averages;
 } t_cuda;
 
+__global__
+void reduction(float* partial_sum,
+  float* averages,
+  int nGroups,
+  int freeCells)
+{
+  int id = blockIdx.x *blockDim.x + threadIdx.x;
+  float total = 0;
+  for (int i = 0; i < nGroups; i++){
+  total += partial_sum[i + (nGroups * id)];
+  }
+  averages[id] = total/(float) freeCells;
+}
+
 
 __global__
 void accelerate_flow(float* cells,
@@ -138,150 +152,148 @@ __global__
 void lbm(float* cells,
   float* tmp_cells,
   int* obstacles,
-  float* local_sum, //stores per thread, maybe not needed
   float* partial_sum, //stores per workgroup
   int globalnx, int globalny, int localnx, int localny, 
   float omega, int iter)
-{
-float c_sq = 1.f / 3.f; /* square of speed of sound */
-float w0 = 4.f / 9.f;  /* weighting factor */
-float w1 = 1.f / 9.f;  /* weighting factor */
-float w2 = 1.f / 36.f; /* weighting factor */
-float tot_u = 0;          /* accumulated magnitudes of velocity for each cell */
-float speed0,speed1,speed2,speed3,speed4,speed5,speed6,speed7,speed8;
-/* get column and row indices */
-int ii = get_global_id(0);
-int jj = get_global_id(1);
-int lx = get_local_id(0);
-int ly = get_local_id(1);
+  {
+  extern __shared__ float local_sum[]; //stores per thread, maybe not needed
+  float c_sq = 1.f / 3.f; /* square of speed of sound */
+  float w0 = 4.f / 9.f;  /* weighting factor */
+  float w1 = 1.f / 9.f;  /* weighting factor */
+  float w2 = 1.f / 36.f; /* weighting factor */
+  float tot_u = 0;          /* accumulated magnitudes of velocity for each cell */
+  float speed0,speed1,speed2,speed3,speed4,speed5,speed6,speed7,speed8;
+  /* get column and row indices */
+  int ii = blockIdx.x * blockDim.x + threadIdx.x;
+  int jj = blockIdx.y * blockDim.y + threadIdx.y;
+  int lx = threadIdx.x;
+  int ly = threadIdx.y;
 
-int idx = ii/localnx + (globalnx/localnx) * jj/localny;
-int offset = iter * (globalnx/localnx)* (globalny/localny) ;
+  int idx = ii/localnx + (globalnx/localnx) * (jj/localny);
+  int offset = iter * (globalnx/localnx)* (globalny/localny);
 
-int ngroupX = get_num_groups(0);
-int ngroupY = get_num_groups(1);  //Array to lookup write direction
-int indexLookup[9][2] = {{0,0},{3,1},{4,2},{1,3},{2,4},{7,5},{8,6},{5,7},{6,8}};
+  //Array to lookup write direction
+  int indexLookup[9][2] = {{0,0},{3,1},{4,2},{1,3},{2,4},{7,5},{8,6},{5,7},{6,8}};
 
-int y_n = (jj + 1) % globalny;
-int x_e = (ii + 1) % globalnx;
-int y_s = (jj == 0) ? (jj + globalny - 1) : (jj - 1);
-int x_w = (ii == 0) ? (ii + globalnx - 1) : (ii - 1);
-
-speed0 = cells[INDEX(ii,jj,0,globalnx,globalny)]; /* central cell, no movement */
-speed1 = cells[INDEX(x_w,jj,1,globalnx,globalny)]; /* west */
-speed2 = cells[INDEX(ii,y_s,2,globalnx,globalny)]; /* south */
-speed3 = cells[INDEX(x_e,jj,3,globalnx,globalny)]; /* east */
-speed4 = cells[INDEX(ii,y_n,4,globalnx,globalny)]; /* north */
-speed5 = cells[INDEX(x_w,y_s,5,globalnx,globalny)]; /* south-west */
-speed6 = cells[INDEX(x_e,y_s,6,globalnx,globalny)];  /* south-east */
-speed7 = cells[INDEX(x_e,y_n,7,globalnx,globalny)]; /* north-east */
-speed8 = cells[INDEX(x_w,y_n,8,globalnx,globalny)]; /* north-west */
-
-/* compute local density total */
-float local_density = 0.f;
-
-
-local_density = speed0 + speed1 + speed2 + speed3 + speed4 + speed5 + speed6 + speed7 + speed8;
-
-
-/* compute x velocity component */
-float u_x = (speed1
-+ speed5
-+ speed8
-- speed3
-- speed6
-- speed7)
-/ local_density;
-/* compute y velocity component */
-float u_y = (speed2
-+ speed5
-+ speed6
-- speed4
-- speed7
-- speed8)
-/ local_density;
-
-/* velocity squared */
-float u_sq = u_x * u_x + u_y * u_y;
-
-/* directional velocity components */
-float u[NSPEEDS];
-u[1] =   u_x;        /* east */
-u[2] =         u_y;  /* north */
-u[3] = - u_x;        /* west */
-u[4] =       - u_y;  /* south */
-u[5] =   u_x + u_y;  /* north-east */
-u[6] = - u_x + u_y;  /* north-west */
-u[7] = - u_x - u_y;  /* south-west */
-u[8] =   u_x - u_y;  /* south-east */
-
-/* equilibrium densities */
-float d_equ[NSPEEDS];
-/* zero velocity density: weight w0 */
-d_equ[0] = w0 * local_density
-* (1.f - u_sq / (2.f * c_sq));
-/* axis speeds: weight w1 */
-d_equ[1] = w1 * local_density * (1.f + u[1] / c_sq
-                    + (u[1] * u[1]) / (2.f * c_sq * c_sq)
-                    - u_sq / (2.f * c_sq));
-d_equ[2] = w1 * local_density * (1.f + u[2] / c_sq
-                    + (u[2] * u[2]) / (2.f * c_sq * c_sq)
-                    - u_sq / (2.f * c_sq));
-d_equ[3] = w1 * local_density * (1.f + u[3] / c_sq
-                    + (u[3] * u[3]) / (2.f * c_sq * c_sq)
-                    - u_sq / (2.f * c_sq));
-d_equ[4] = w1 * local_density * (1.f + u[4] / c_sq
-                    + (u[4] * u[4]) / (2.f * c_sq * c_sq)
-                    - u_sq / (2.f * c_sq));
-/* diagonal speeds: weight w2 */
-d_equ[5] = w2 * local_density * (1.f + u[5] / c_sq
-                    + (u[5] * u[5]) / (2.f * c_sq * c_sq)
-                    - u_sq / (2.f * c_sq));
-d_equ[6] = w2 * local_density * (1.f + u[6] / c_sq
-                    + (u[6] * u[6]) / (2.f * c_sq * c_sq)
-                    - u_sq / (2.f * c_sq));
-d_equ[7] = w2 * local_density * (1.f + u[7] / c_sq
-                    + (u[7] * u[7]) / (2.f * c_sq * c_sq)
-                    - u_sq / (2.f * c_sq));
-d_equ[8] = w2 * local_density * (1.f + u[8] / c_sq
-                    + (u[8] * u[8]) / (2.f * c_sq * c_sq)
-                    - u_sq / (2.f * c_sq));
-
-/* relaxation step */
-bool mask = !obstacles[ii+jj*globalnx];
-tmp_cells[INDEX(ii,jj,indexLookup[0][mask],globalnx,globalny)] = speed0 + mask * (omega * (d_equ[0] - speed0));
-tmp_cells[INDEX(ii,jj,indexLookup[1][mask],globalnx,globalny)] = speed1 + mask * (omega * (d_equ[1] - speed1));
-tmp_cells[INDEX(ii,jj,indexLookup[2][mask],globalnx,globalny)] = speed2 + mask * (omega * (d_equ[2] - speed2));
-tmp_cells[INDEX(ii,jj,indexLookup[3][mask],globalnx,globalny)] = speed3 + mask * (omega * (d_equ[3] - speed3));
-tmp_cells[INDEX(ii,jj,indexLookup[4][mask],globalnx,globalny)] = speed4 + mask * (omega * (d_equ[4] - speed4));
-tmp_cells[INDEX(ii,jj,indexLookup[5][mask],globalnx,globalny)] = speed5 + mask * (omega * (d_equ[5] - speed5));
-tmp_cells[INDEX(ii,jj,indexLookup[6][mask],globalnx,globalny)] = speed6 + mask * (omega * (d_equ[6] - speed6));
-tmp_cells[INDEX(ii,jj,indexLookup[7][mask],globalnx,globalny)] = speed7 + mask * (omega * (d_equ[7] - speed7));
-tmp_cells[INDEX(ii,jj,indexLookup[8][mask],globalnx,globalny)] = speed8 + mask * (omega * (d_equ[8] - speed8));
-
-/*
-tot_u += native_sqrt((u_x * u_x) + (u_y * u_y));
-
-//take to outer loop
-local_sum[lx+ly*localnx] = mask?tot_u:0;
-
-// Adapted from dournac.org
-for (int stride = (localnx*localny)/2; stride>0; stride /=2)
-{
-// Waiting for each 2x2 addition into given workgroup
-barrier(CLK_LOCAL_MEM_FENCE);
-
-// Add elements 2 by 2 between local_id and local_id + stride
-if ((lx+ly*localnx) < stride)
-local_sum[(lx+ly*localnx)] += local_sum[(lx+ly*localnx) + stride];
-}
+  int y_n = (jj + 1) % globalny;
+  int x_e = (ii + 1) % globalnx;
+  int y_s = (jj == 0) ? (jj + globalny - 1) : (jj - 1);
+  int x_w = (ii == 0) ? (ii + globalnx - 1) : (ii - 1);
+  
+  speed0 = cells[INDEX(ii,jj,0,globalnx,globalny)]; /* central cell, no movement */
+  speed1 = cells[INDEX(x_w,jj,1,globalnx,globalny)]; /* west */
+  speed2 = cells[INDEX(ii,y_s,2,globalnx,globalny)]; /* south */
+  speed3 = cells[INDEX(x_e,jj,3,globalnx,globalny)]; /* east */
+  speed4 = cells[INDEX(ii,y_n,4,globalnx,globalny)]; /* north */
+  speed5 = cells[INDEX(x_w,y_s,5,globalnx,globalny)]; /* south-west */
+  speed6 = cells[INDEX(x_e,y_s,6,globalnx,globalny)];  /* south-east */
+  speed7 = cells[INDEX(x_e,y_n,7,globalnx,globalny)]; /* north-east */
+  speed8 = cells[INDEX(x_w,y_n,8,globalnx,globalny)]; /* north-west */
+  
+  /* compute local density total */
+  float local_density = 0.f;
+  
+  
+  local_density = speed0 + speed1 + speed2 + speed3 + speed4 + speed5 + speed6 + speed7 + speed8;
 
 
+  /* compute x velocity component */
+  float u_x = (speed1
+  + speed5
+  + speed8
+  - speed3
+  - speed6
+  - speed7)
+  / local_density;
+  /* compute y velocity component */
+  float u_y = (speed2
+  + speed5
+  + speed6
+  - speed4
+  - speed7
+  - speed8)
+  / local_density;
 
-if (lx == 0 && ly == 0){
-partial_sum[ idx + offset ] = local_sum[0];
-}
-*/
+  /* velocity squared */
+  float u_sq = u_x * u_x + u_y * u_y;
+
+  /* directional velocity components */
+  float u[NSPEEDS];
+  u[1] =   u_x;        /* east */
+  u[2] =         u_y;  /* north */
+  u[3] = - u_x;        /* west */
+  u[4] =       - u_y;  /* south */
+  u[5] =   u_x + u_y;  /* north-east */
+  u[6] = - u_x + u_y;  /* north-west */
+  u[7] = - u_x - u_y;  /* south-west */
+  u[8] =   u_x - u_y;  /* south-east */
+
+  /* equilibrium densities */
+  float d_equ[NSPEEDS];
+  /* zero velocity density: weight w0 */
+  d_equ[0] = w0 * local_density
+  * (1.f - u_sq / (2.f * c_sq));
+  /* axis speeds: weight w1 */
+  d_equ[1] = w1 * local_density * (1.f + u[1] / c_sq
+                      + (u[1] * u[1]) / (2.f * c_sq * c_sq)
+                      - u_sq / (2.f * c_sq));
+  d_equ[2] = w1 * local_density * (1.f + u[2] / c_sq
+                      + (u[2] * u[2]) / (2.f * c_sq * c_sq)
+                      - u_sq / (2.f * c_sq));
+  d_equ[3] = w1 * local_density * (1.f + u[3] / c_sq
+                      + (u[3] * u[3]) / (2.f * c_sq * c_sq)
+                      - u_sq / (2.f * c_sq));
+  d_equ[4] = w1 * local_density * (1.f + u[4] / c_sq
+                      + (u[4] * u[4]) / (2.f * c_sq * c_sq)
+                      - u_sq / (2.f * c_sq));
+  /* diagonal speeds: weight w2 */
+  d_equ[5] = w2 * local_density * (1.f + u[5] / c_sq
+                      + (u[5] * u[5]) / (2.f * c_sq * c_sq)
+                      - u_sq / (2.f * c_sq));
+  d_equ[6] = w2 * local_density * (1.f + u[6] / c_sq
+                      + (u[6] * u[6]) / (2.f * c_sq * c_sq)
+                      - u_sq / (2.f * c_sq));
+  d_equ[7] = w2 * local_density * (1.f + u[7] / c_sq
+                      + (u[7] * u[7]) / (2.f * c_sq * c_sq)
+                      - u_sq / (2.f * c_sq));
+  d_equ[8] = w2 * local_density * (1.f + u[8] / c_sq
+                      + (u[8] * u[8]) / (2.f * c_sq * c_sq)
+                      - u_sq / (2.f * c_sq));
+
+  /* relaxation step */
+  bool mask = !obstacles[ii+jj*globalnx];
+  tmp_cells[INDEX(ii,jj,indexLookup[0][mask],globalnx,globalny)] = speed0 + mask * (omega * (d_equ[0] - speed0));
+  tmp_cells[INDEX(ii,jj,indexLookup[1][mask],globalnx,globalny)] = speed1 + mask * (omega * (d_equ[1] - speed1));
+  tmp_cells[INDEX(ii,jj,indexLookup[2][mask],globalnx,globalny)] = speed2 + mask * (omega * (d_equ[2] - speed2));
+  tmp_cells[INDEX(ii,jj,indexLookup[3][mask],globalnx,globalny)] = speed3 + mask * (omega * (d_equ[3] - speed3));
+  tmp_cells[INDEX(ii,jj,indexLookup[4][mask],globalnx,globalny)] = speed4 + mask * (omega * (d_equ[4] - speed4));
+  tmp_cells[INDEX(ii,jj,indexLookup[5][mask],globalnx,globalny)] = speed5 + mask * (omega * (d_equ[5] - speed5));
+  tmp_cells[INDEX(ii,jj,indexLookup[6][mask],globalnx,globalny)] = speed6 + mask * (omega * (d_equ[6] - speed6));
+  tmp_cells[INDEX(ii,jj,indexLookup[7][mask],globalnx,globalny)] = speed7 + mask * (omega * (d_equ[7] - speed7));
+  tmp_cells[INDEX(ii,jj,indexLookup[8][mask],globalnx,globalny)] = speed8 + mask * (omega * (d_equ[8] - speed8));
+
+
+  tot_u += sqrt((u_x * u_x) + (u_y * u_y));
+
+  // //take to outer loop
+  local_sum[lx+ly*localnx] = mask?tot_u:0;
+
+  // // Adapted from dournac.org
+  for (int stride = (localnx*localny)/2; stride>0; stride /=2)
+  {
+  // Waiting for each 2x2 addition into given workgroup
+  __syncthreads();
+
+  // Add elements 2 by 2 between local_id and local_id + stride
+  if ((lx+ly*localnx) < stride)
+    local_sum[(lx+ly*localnx)] += local_sum[(lx+ly*localnx) + stride];
+  }
+
+
+
+  if (lx == 0 && ly == 0){
+    partial_sum[ idx + offset ] = local_sum[0];
+  }
 }
 
 
@@ -302,7 +314,6 @@ int initialise(const char* paramfile, const char* obstaclefile,
 ** timestep calls, in order, the functions:
 ** accelerate_flow(), propagate(), rebound() & collision()
 */
-int lbm(const t_param params, float* read, float* write, t_cuda cuda);
 
 /* finalise, including freeing up allocated memory */
 int finalise(const t_param* params, float** cells_ptr, float** tmp_cells_ptr,
@@ -328,34 +339,6 @@ void usage(const char* exe);
 ** initialise, timestep loop, finalise
 */
 
-int reduction(t_param params, t_cuda cuda,float* av_ptr){
-  // cl_int err;
-  // int nGroups = params.nworkgroupsX * params.nworkgroupsY;
-
-  // // Set kernel arguments
-  // err = clSetKernelArg(.reduction, 0, sizeof(cl_mem), &.partial_sums);
-  // checkError(err, "setting reduction arg 0", __LINE__);
-  // err = clSetKernelArg(.reduction, 1, sizeof(cl_mem), &.averages);
-  // checkError(err, "setting reduction arg 1", __LINE__);
-  // err = clSetKernelArg(.reduction, 2, sizeof(cl_int), &nGroups);
-  // checkError(err, "setting reduction arg 2", __LINE__);
-  // err = clSetKernelArg(.reduction, 3, sizeof(cl_int), &params.free_cells);
-  // checkError(err, "setting reduction arg 3", __LINE__);
-
-  // // Enqueue kernel
-  // size_t global[1] = {params.reduction_count};
-  // err = clEnqueueNDRangeKernel(.queue, .reduction,
-  //                              1, NULL, global, NULL, 0, NULL, NULL);
-  // checkError(err, "enqueueing reduction kernel", __LINE__);
-
-  // clFinish(.queue);
-  // checkError(err, "waiting for the end", __LINE__);
-
-  // clEnqueueReadBuffer(.queue,.averages,CL_TRUE,0,sizeof(cl_float) * params.reduction_count,av_ptr,0,NULL,NULL);
-
-  return EXIT_SUCCESS;
-}
-
 int main(int argc, char* argv[])
 {
   char*    paramfile = NULL;    /* name of the input parameter file */
@@ -364,9 +347,7 @@ int main(int argc, char* argv[])
   t_cuda    cuda;                 /* struct to hold OpenCL objects */
   float* cells     = NULL;    /* grid containing fluid densities */
   float* tmp_cells = NULL;    /* scratch space */
-  float* cells_swap_pt = NULL;
   float* partial_sums = NULL;
-  float* swap_point = NULL;
   int*     obstacles = NULL;    /* grid indicating which cells are blocked */
   int free_cells = 0;
   float* av_vels   = NULL;     /* a record of the av. velocity computed for each timestep */
@@ -401,7 +382,7 @@ int main(int argc, char* argv[])
 
 
   // Write cells and obstacles to device
-  cudaMemcpy(cuda.cells,cells,params.nx * params.ny * NSPEEDS *sizeof(float),cudaMemcpyHostToDevice);
+  cudaMemcpy(cuda.cells,cells,params.nx * params.ny * NSPEEDS * sizeof(float),cudaMemcpyHostToDevice);
   cudaMemcpy(cuda.obstacles,obstacles,params.nx * params.ny * sizeof(int),cudaMemcpyHostToDevice);
 
 
@@ -411,16 +392,20 @@ int main(int argc, char* argv[])
   params.w1 = (params.density*params.accel)/9.0f;
   params.w2 = (params.density*params.accel)/36.0f;
   float* av_ptr = av_vels;
+  dim3 gridsize(params.nworkgroupsX,params.nworkgroupsY);
+  dim3 blocksize(params.localnx,params.localny);
 
   for (int tt = 0; tt < params.maxIters; tt++)
   {
 
     accelerate_flow<<<params.nx,1>>>(cellPointers[read], cuda.obstacles, params.nx,params.ny,params.w1,params.w2);
-    lbm<<<>>>(params, cellPointers[read], cellPointers[write],cuda);
+    
+    lbm<<<gridsize,blocksize,sizeof(float) * params.localnx * params.localny>>>(cellPointers[read], cellPointers[write],cuda.obstacles,cuda.partial_sums,params.nx,params.ny,params.localnx,params.localny,params.omega,params.reduction_count);
 
     params.reduction_count++;
     if (params.reduction_count == params.reduction_cap){
-      reduction(params,cuda,av_ptr);
+      reduction<<<params.reduction_count,1>>>(cuda.partial_sums,cuda.averages,params.nworkgroupsX*params.nworkgroupsY,params.free_cells);
+      cudaMemcpy(av_ptr,cuda.averages,params.reduction_count*sizeof(float),cudaMemcpyDeviceToHost);
       params.reduction_count = 0;
       av_ptr = &av_ptr[params.reduction_cap];
     }
@@ -437,8 +422,9 @@ int main(int argc, char* argv[])
 
   // Final reduction
   if (params.reduction_count != 0){
-    reduction(params,cuda,av_ptr);
-      }
+    reduction<<<params.reduction_count,1>>>(cuda.partial_sums,cuda.averages,params.nworkgroupsX*params.nworkgroupsY,params.free_cells);
+    cudaMemcpy(av_ptr,cuda.averages,params.reduction_count*sizeof(float),cudaMemcpyDeviceToHost);    
+  }
 
   cudaMemcpy(cells,cuda.cells,params.nx * params.ny * NSPEEDS * sizeof(float),cudaMemcpyDeviceToHost);
 
@@ -458,43 +444,6 @@ int main(int argc, char* argv[])
   printf("Elapsed system CPU time:\t%.6lf (s)\n", systim);
   write_values(params, cells, obstacles, av_vels);
   finalise(&params, &cells, &tmp_cells, &obstacles, &av_vels, cuda);
-
-  return EXIT_SUCCESS;
-}
-
-
-int lbm(const t_param params,float* read, float* write, t_cuda cuda)
-{
-  // cl_int err;
-  // // Set kernel arguments
-  // err = clSetKernelArg(.lbm, 0, sizeof(cl_mem), &read);
-  // checkError(err, "setting lbm arg 0", __LINE__);
-  // err = clSetKernelArg(.lbm, 1, sizeof(cl_mem), &write);
-  // checkError(err, "setting lbm arg 1", __LINE__);
-  // err = clSetKernelArg(.lbm, 2, sizeof(cl_mem), &.obstacles);
-  // checkError(err, "setting lbm arg 2", __LINE__);
-  // err = clSetKernelArg(.lbm, 3, sizeof(cl_float) * NSPEEDS * params.localnx * params.localny, NULL);
-  // checkError(err, "setting lbm arg 3", __LINE__);
-  // err = clSetKernelArg(.lbm, 4, sizeof(cl_mem), &.partial_sums);
-  // checkError(err, "setting lbm arg 4", __LINE__);
-  // err = clSetKernelArg(.lbm, 5, sizeof(cl_int), &params.nx);
-  // checkError(err, "setting lbm arg 5", __LINE__);
-  // err = clSetKernelArg(.lbm, 6, sizeof(cl_int), &params.ny);
-  // checkError(err, "setting lbm arg 6", __LINE__);
-  //   err = clSetKernelArg(.lbm, 7, sizeof(cl_int), &params.localnx);
-  // checkError(err, "setting lbm arg 7", __LINE__);
-  // err = clSetKernelArg(.lbm, 8, sizeof(cl_int), &params.localny);
-  // checkError(err, "setting lbm arg 8", __LINE__);
-  // err = clSetKernelArg(.lbm, 9, sizeof(cl_float), &params.omega);
-  // checkError(err, "setting lbm arg 9", __LINE__);
-  // err = clSetKernelArg(.lbm, 10, sizeof(cl_int), &params.reduction_count);
-  // checkError(err, "setting lbm arg 10", __LINE__);
-
-  // size_t global[2] = {params.nx, params.ny};
-  // size_t local[2] = {params.localnx,params.localny};
-  // err = clEnqueueNDRangeKernel(.queue, .lbm,
-  //                              2, NULL, global, local, 0, NULL, NULL);
-  // checkError(err, "enqueueing lbm kernel", __LINE__);
 
   return EXIT_SUCCESS;
 }
