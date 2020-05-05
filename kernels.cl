@@ -165,13 +165,11 @@ tot_u += native_sqrt((u_x * u_x) + (u_y * u_y));
 //take to outer loop
 local_sum[lx+ly*localnx] = mask?tot_u:0;
 
-// Adapted from dournac.org
+// Parallel sum
 for (int stride = (localnx*localny)/2; stride>0; stride /=2)
     {
-    // Waiting for each 2x2 addition into given workgroup
     barrier(CLK_LOCAL_MEM_FENCE);
 
-    // Add elements 2 by 2 between local_id and local_id + stride
     if ((lx+ly*localnx) < stride)
       local_sum[(lx+ly*localnx)] += local_sum[(lx+ly*localnx) + stride];
     }

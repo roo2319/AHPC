@@ -161,20 +161,18 @@ void lbm(float* cells,
   float w0 = 4.f / 9.f;  /* weighting factor */
   float w1 = 1.f / 9.f;  /* weighting factor */
   float w2 = 1.f / 36.f; /* weighting factor */
-  float tot_u = 0;          /* accumulated magnitudes of velocity for each cell */
   float speed0,speed1,speed2,speed3,speed4,speed5,speed6,speed7,speed8;
   /* get column and row indices */
   int ii = blockIdx.x * blockDim.x + threadIdx.x;
   int jj = blockIdx.y * blockDim.y + threadIdx.y;
   int lx = threadIdx.x;
   int ly = threadIdx.y;
-
+  
   int idx = ii/localnx + (globalnx/localnx) * (jj/localny);
   int offset = iter * (globalnx/localnx)* (globalny/localny);
-
+  
   //Array to lookup write direction
-  int indexLookup[9][2] = {{0,0},{3,1},{4,2},{1,3},{2,4},{7,5},{8,6},{5,7},{6,8}};
-
+  
   int y_n = (jj + 1) % globalny;
   int x_e = (ii + 1) % globalnx;
   int y_s = (jj == 0) ? (jj + globalny - 1) : (jj - 1);
@@ -191,6 +189,7 @@ void lbm(float* cells,
   speed8 = cells[INDEX(x_w,y_n,8,globalnx,globalny)]; /* north-west */
   
   /* compute local density total */
+  if (!obstacles[ii+jj*globalnx]){
   float local_density = 0.f;
   
   
@@ -260,31 +259,38 @@ void lbm(float* cells,
                       + (u[8] * u[8]) / (2.f * c_sq * c_sq)
                       - u_sq / (2.f * c_sq));
 
+  tmp_cells[INDEX(ii,jj,0,globalnx,globalny)] = speed0 + (omega * (d_equ[0] - speed0));
+  tmp_cells[INDEX(ii,jj,1,globalnx,globalny)] = speed1 + (omega * (d_equ[1] - speed1));
+  tmp_cells[INDEX(ii,jj,2,globalnx,globalny)] = speed2 + (omega * (d_equ[2] - speed2));
+  tmp_cells[INDEX(ii,jj,3,globalnx,globalny)] = speed3 + (omega * (d_equ[3] - speed3));
+  tmp_cells[INDEX(ii,jj,4,globalnx,globalny)] = speed4 + (omega * (d_equ[4] - speed4));
+  tmp_cells[INDEX(ii,jj,5,globalnx,globalny)] = speed5 + (omega * (d_equ[5] - speed5));
+  tmp_cells[INDEX(ii,jj,6,globalnx,globalny)] = speed6 + (omega * (d_equ[6] - speed6));
+  tmp_cells[INDEX(ii,jj,7,globalnx,globalny)] = speed7 + (omega * (d_equ[7] - speed7));
+  tmp_cells[INDEX(ii,jj,8,globalnx,globalny)] = speed8 + (omega * (d_equ[8] - speed8));
+  local_sum[lx+ly*localnx] = sqrtf((u_x * u_x) + (u_y * u_y));
+  }
   /* relaxation step */
-  bool mask = !obstacles[ii+jj*globalnx];
-  tmp_cells[INDEX(ii,jj,indexLookup[0][mask],globalnx,globalny)] = speed0 + mask * (omega * (d_equ[0] - speed0));
-  tmp_cells[INDEX(ii,jj,indexLookup[1][mask],globalnx,globalny)] = speed1 + mask * (omega * (d_equ[1] - speed1));
-  tmp_cells[INDEX(ii,jj,indexLookup[2][mask],globalnx,globalny)] = speed2 + mask * (omega * (d_equ[2] - speed2));
-  tmp_cells[INDEX(ii,jj,indexLookup[3][mask],globalnx,globalny)] = speed3 + mask * (omega * (d_equ[3] - speed3));
-  tmp_cells[INDEX(ii,jj,indexLookup[4][mask],globalnx,globalny)] = speed4 + mask * (omega * (d_equ[4] - speed4));
-  tmp_cells[INDEX(ii,jj,indexLookup[5][mask],globalnx,globalny)] = speed5 + mask * (omega * (d_equ[5] - speed5));
-  tmp_cells[INDEX(ii,jj,indexLookup[6][mask],globalnx,globalny)] = speed6 + mask * (omega * (d_equ[6] - speed6));
-  tmp_cells[INDEX(ii,jj,indexLookup[7][mask],globalnx,globalny)] = speed7 + mask * (omega * (d_equ[7] - speed7));
-  tmp_cells[INDEX(ii,jj,indexLookup[8][mask],globalnx,globalny)] = speed8 + mask * (omega * (d_equ[8] - speed8));
+  else{
+    tmp_cells[INDEX(ii,jj,0,globalnx,globalny)] = speed0;
+    tmp_cells[INDEX(ii,jj,1,globalnx,globalny)] = speed3;
+    tmp_cells[INDEX(ii,jj,2,globalnx,globalny)] = speed4;
+    tmp_cells[INDEX(ii,jj,3,globalnx,globalny)] = speed1;
+    tmp_cells[INDEX(ii,jj,4,globalnx,globalny)] = speed2;
+    tmp_cells[INDEX(ii,jj,5,globalnx,globalny)] = speed7;
+    tmp_cells[INDEX(ii,jj,7,globalnx,globalny)] = speed5;
+    tmp_cells[INDEX(ii,jj,6,globalnx,globalny)] = speed8;
+    tmp_cells[INDEX(ii,jj,8,globalnx,globalny)] = speed6;
+    local_sum[lx+ly*localnx] = 0;
+  }
 
 
-  tot_u += sqrt((u_x * u_x) + (u_y * u_y));
 
-  // //take to outer loop
-  local_sum[lx+ly*localnx] = mask?tot_u:0;
-
-  // // Adapted from dournac.org
+  // Parallel sum
   for (int stride = (localnx*localny)/2; stride>0; stride /=2)
   {
-  // Waiting for each 2x2 addition into given workgroup
   __syncthreads();
 
-  // Add elements 2 by 2 between local_id and local_id + stride
   if ((lx+ly*localnx) < stride)
     local_sum[(lx+ly*localnx)] += local_sum[(lx+ly*localnx) + stride];
   }
@@ -427,6 +433,8 @@ int main(int argc, char* argv[])
   }
 
   cudaMemcpy(cells,cuda.cells,params.nx * params.ny * NSPEEDS * sizeof(float),cudaMemcpyDeviceToHost);
+
+  cudaDeviceSynchronize();
 
   gettimeofday(&timstr, NULL);
   toc = timstr.tv_sec + (timstr.tv_usec / 1000000.0);
