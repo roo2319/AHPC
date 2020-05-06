@@ -133,7 +133,6 @@ int ii =  blockIdx.x *blockDim.x + threadIdx.x;
 
 /* if the cell is not occupied and
 ** we don't send a negative density */
-// 367 can be private
 bool mask = (!obstacles[ii + jj* nx]
 && (cells[INDEX(ii,jj,3,nx,ny)] - w1) > 0.f
 && (cells[INDEX(ii,jj,6,nx,ny)] - w2) > 0.f
@@ -175,8 +174,8 @@ void lbm(float* cells,
   
   int y_n = (jj + 1) % globalny;
   int x_e = (ii + 1) % globalnx;
-  int y_s = (jj == 0) ? (jj + globalny - 1) : (jj - 1);
-  int x_w = (ii == 0) ? (ii + globalnx - 1) : (ii - 1);
+  int y_s = (jj == 0) ? (globalny - 1) : (jj - 1);
+  int x_w = (ii == 0) ? (globalnx - 1) : (ii - 1);
   
   speed0 = cells[INDEX(ii,jj,0,globalnx,globalny)]; /* central cell, no movement */
   speed1 = cells[INDEX(x_w,jj,1,globalnx,globalny)]; /* west */
@@ -302,13 +301,6 @@ void lbm(float* cells,
   }
 }
 
-
-
-/* struct to hold the 'speed' values */
-
-/*
-** function prototypes
-*/
 
 /* load params, allocate memory, load obstacles & initialise fluid particle densities */
 int initialise(const char* paramfile, const char* obstaclefile,

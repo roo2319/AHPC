@@ -30,3 +30,6 @@ check:
 
 clean:
 	rm -f $(EXE)
+
+cuda: 
+	nvcc -o d2q9-bgk d2q9-bgk.cu
